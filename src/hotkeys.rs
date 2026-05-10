@@ -7,6 +7,7 @@ use std::{
 
 use color_eyre::eyre::Result;
 use evdev::{Device, InputEventKind, Key};
+#[cfg(feature = "overlay")]
 use gtk::glib;
 use notify::{event::CreateKind, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::sync::mpsc::{self, channel};
