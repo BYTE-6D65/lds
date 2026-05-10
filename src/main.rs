@@ -1,13 +1,11 @@
 use clap::Parser;
 use color_eyre::eyre::Result;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::runtime::Runtime;
+use tokio::sync::mpsc;
 
 mod audio_capture;
 mod cli;
-mod keyboard;
+mod ipc;
 mod whisper_provider;
 
 #[cfg(feature = "overlay")]
@@ -17,131 +15,152 @@ mod app;
 mod hotkeys;
 
 #[cfg(feature = "overlay")]
+mod keyboard;
+
+#[cfg(feature = "overlay")]
 mod waybar;
 
-pub fn runtime() -> &'static Runtime {
-    static RUNTIME: OnceLock<Runtime> = OnceLock::new();
-    RUNTIME.get_or_init(|| Runtime::new().expect("Setting up tokio runtime needs to succeed."))
+#[cfg(feature = "overlay")]
+pub fn runtime() -> &'static tokio::runtime::Runtime {
+    static RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+    RUNTIME.get_or_init(|| tokio::runtime::Runtime::new().expect("Setting up tokio runtime needs to succeed."))
+}
+
+/// Commands from IPC handler to daemon worker
+enum DaemonCmd {
+    Start,
+    Stop,
 }
 
 fn main() -> Result<()> {
     color_eyre::install()?;
     let args = cli::Cli::parse();
 
+    let rt = tokio::runtime::Runtime::new()?;
+
     match args.command {
         #[cfg(feature = "overlay")]
         cli::Command::WaybarStatus { connection_opts } => {
-            runtime()
-                .block_on(async move { waybar::main_waybar_status(&connection_opts).await })?;
+            rt.block_on(async {
+                waybar::main_waybar_status(&connection_opts).await
+            })?;
         }
         #[cfg(feature = "overlay")]
         command @ cli::Command::Overlay { .. } => {
             app::launch_app(command)?;
         }
         cli::Command::Daemon { model, socket, .. } => {
-            run_daemon(&model, &socket)?;
+            rt.block_on(run_daemon(&model, &socket))?;
         }
     }
 
     Ok(())
 }
 
-use std::sync::OnceLock;
+async fn run_daemon(model_path: &str, socket_path: &str) -> Result<()> {
+    eprintln!("[lds] daemon starting...");
 
-fn run_daemon(model_path: &str, _socket_path: &str) -> Result<()> {
-    println!("[lds] daemon starting...");
-
-    // Load whisper model with GPU
-    println!("[lds] loading model: {}", model_path);
+    eprintln!("[lds] loading model: {}", model_path);
     let provider = Arc::new(Mutex::new(whisper_provider::WhisperProvider::new(model_path)?));
-    println!("[lds] model loaded with Vulkan GPU.");
+    eprintln!("[lds] model loaded with Vulkan GPU.");
 
-    // Init audio capture
     let capture = Arc::new(audio_capture::AudioCapture::new()?);
-    println!("[lds] audio capture ready.");
+    eprintln!("[lds] audio capture ready.");
 
-    // State machine
-    let recording = Arc::new(Mutex::new(false));
+    let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<DaemonCmd>();
+    let handle = Arc::new(ipc::DaemonHandle::new());
 
-    println!("[lds] daemon ready. Type 'start' / 'stop' / 'quit' and press Enter.");
-    println!("[lds] (IPC not yet wired — using stdin for testing)");
+    // Register IPC callbacks → send commands through channel
+    {
+        let cmd_tx = cmd_tx.clone();
+        *handle.on_start.lock().await = Some(Box::new(move || {
+            cmd_tx.send(DaemonCmd::Start).ok();
+            Ok(())
+        }));
+    }
+    {
+        let cmd_tx = cmd_tx.clone();
+        *handle.on_stop.lock().await = Some(Box::new(move || {
+            cmd_tx.send(DaemonCmd::Stop).ok();
+            Ok(String::new())
+        }));
+    }
 
-    // Simple stdin loop for testing (will be replaced by IPC in Sprint 3)
-    runtime().block_on(async {
-        let stdin = BufReader::new(tokio::io::stdin());
-        let mut lines = stdin.lines();
+    handle.set_state(ipc::DaemonState::Idle).await;
+    eprintln!("[lds] daemon ready. IPC on {}", socket_path);
 
-        loop {
-            let Some(line) = lines.next_line().await.ok().flatten() else {
-                break;
-            };
-            let cmd = line.trim();
-
-            match cmd {
-                "start" | "s" => {
-                    if *recording.lock().unwrap() {
-                        println!("[lds] already recording");
-                        continue;
-                    }
-                    *recording.lock().unwrap() = true;
-                    capture.start();
-                    println!("[lds] ● recording...");
-                }
-                "stop" | "x" => {
-                    if !*recording.lock().unwrap() {
-                        println!("[lds] not recording");
-                        continue;
-                    }
-                    *recording.lock().unwrap() = false;
-                    let samples = capture.stop();
-
-                    if samples.is_empty() {
-                        println!("[lds] no audio captured");
-                        continue;
-                    }
-
-                    let duration = samples.len() as f32 / 16000.0;
-                    println!("[lds] transcribing {:.1}s of audio...", duration);
-
-                    // Transcribe
-                    let provider = provider.clone();
-                    let text = tokio::task::spawn_blocking(move || {
-                        provider.lock().unwrap().transcribe(&samples)
-                    })
-                    .await
-                    .expect("transcription task panicked")
-                    .expect("transcription failed");
-
-                    if text.is_empty() {
-                        println!("[lds] (no speech detected)");
-                        continue;
-                    }
-
-                    println!("[lds] transcript: \"{}\"", text);
-
-                    // Clipboard write (Sprint 2 — best-effort)
-                    match write_clipboard(&text) {
-                        Ok(()) => println!("[lds] ✓ copied to clipboard"),
-                        Err(e) => println!("[lds] ✗ clipboard failed: {} (text printed above)", e),
-                    }
-
-                    // Auto-type (best-effort)
-                    match auto_type(&text) {
-                        Ok(()) => println!("[lds] ✓ auto-typed"),
-                        Err(e) => println!("[lds] ✗ auto-type failed: {}", e),
-                    }
-                }
-                "quit" | "q" => {
-                    println!("[lds] shutting down");
-                    break;
-                }
-                "" => continue,
-                _ => println!("[lds] unknown command: {} (start/stop/quit)", cmd),
-            }
+    // Spawn IPC server as a task on the SAME runtime
+    let ipc_handle = handle.clone();
+    let ipc_path = socket_path.to_string();
+    tokio::spawn(async move {
+        if let Err(e) = ipc::serve(&ipc_path, ipc_handle).await {
+            eprintln!("[ipc] server error: {}", e);
         }
     });
 
-    Ok(())
+    // Daemon worker loop — processes commands from IPC
+    let recording: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
+    loop {
+        tokio::select! {
+            Some(cmd) = cmd_rx.recv() => {
+                match cmd {
+                    DaemonCmd::Start => {
+                        if *recording.lock().unwrap() {
+                            eprintln!("[lds] already recording");
+                            continue;
+                        }
+                        *recording.lock().unwrap() = true;
+                        capture.start();
+                        handle.set_state(ipc::DaemonState::Recording).await;
+                        eprintln!("[lds] ● recording...");
+                    }
+                    DaemonCmd::Stop => {
+                        if !*recording.lock().unwrap() {
+                            eprintln!("[lds] not recording");
+                            continue;
+                        }
+                        *recording.lock().unwrap() = false;
+                        let samples = capture.stop();
+
+                        if samples.is_empty() {
+                            handle.set_state(ipc::DaemonState::Error("no audio captured".into())).await;
+                            continue;
+                        }
+
+                        let duration = samples.len() as f32 / 16000.0;
+                        eprintln!("[lds] transcribing {:.1}s...", duration);
+                        handle.set_state(ipc::DaemonState::Transcribing).await;
+
+                        let prov = provider.lock().unwrap();
+                        match prov.transcribe(&samples) {
+                            Ok(text) if !text.is_empty() => {
+                                eprintln!("[lds] transcript: \"{}\"", text);
+                                match write_clipboard(&text) {
+                                    Ok(()) => eprintln!("[lds] ✓ clipboard"),
+                                    Err(e) => eprintln!("[lds] ✗ clipboard: {}", e),
+                                }
+                                match auto_type(&text) {
+                                    Ok(()) => eprintln!("[lds] ✓ auto-type"),
+                                    Err(e) => eprintln!("[lds] ✗ auto-type: {}", e),
+                                }
+                                handle.broadcast_event(
+                                    "final_transcript",
+                                    serde_json::json!({ "text": text }),
+                                ).await;
+                                handle.set_state(ipc::DaemonState::ClipboardWritten).await;
+                            }
+                            Ok(_) => {
+                                handle.set_state(ipc::DaemonState::Error("no speech detected".into())).await;
+                            }
+                            Err(e) => {
+                                handle.set_state(ipc::DaemonState::Error(e.to_string())).await;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn write_clipboard(text: &str) -> Result<()> {

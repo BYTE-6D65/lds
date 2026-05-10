@@ -21,7 +21,8 @@ futures-util = "0.3.30"
 notify = "6.1.1"
 serde = { version = "1.0.203", features = ["derive"] }
 serde_json = "1.0.117"
-tokio = { version = "1.38.0", features = ["rt-multi-thread", "io-util", "sync", "time", "macros", "full"] }
+tokio = { version = "1.38.0", features = ["rt-multi-thread", "io-util", "sync", "time", "macros", "full", "net"] }
+tokio-tungstenite = "0.26"
 tokio-util = { version = "0.7.11", features = ["codec"] }
 whisper-rs = { version = "0.16", features = ["vulkan"] }
 hound = "3.5"
