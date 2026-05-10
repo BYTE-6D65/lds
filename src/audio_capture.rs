@@ -11,18 +11,33 @@ pub struct AudioCapture {
 }
 
 impl AudioCapture {
-    /// Create a new audio capture instance. Does not start recording.
-    /// Tries to use the "pipewire" ALSA device for shared mic access.
+    /// Create with auto-detected device (prefers "pipewire" for shared mic).
     pub fn new() -> Result<Self> {
+        Self::new_with_device("")
+    }
+
+    /// Create with a specific device name. Empty string = auto-detect.
+    pub fn new_with_device(device_name: &str) -> Result<Self> {
         let host = cpal::default_host();
 
-        // Prefer the "pipewire" device for shared mic access
-        let device = host
-            .input_devices()
-            .ok()
-            .and_then(|mut devs| devs.find(|d| d.name().map(|n| n == "pipewire").unwrap_or(false)))
-            .or_else(|| host.default_input_device())
-            .with_context(|| "no audio input device available")?;
+        let device = if device_name.is_empty() {
+            // Prefer the "pipewire" device for shared mic access
+            host.input_devices()
+                .ok()
+                .and_then(|mut devs| {
+                    devs.find(|d| d.name().map(|n| n == "pipewire").unwrap_or(false))
+                })
+                .or_else(|| host.default_input_device())
+                .with_context(|| "no audio input device available")?
+        } else {
+            host.input_devices()
+                .ok()
+                .and_then(|mut devs| {
+                    devs.find(|d| d.name().map(|n| n == device_name).unwrap_or(false))
+                })
+                .or_else(|| host.default_input_device())
+                .with_context(|| format!("device '{}' not found", device_name))?
+        };
 
         println!(
             "[audio] input device: {}",

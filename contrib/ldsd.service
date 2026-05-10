@@ -1,0 +1,25 @@
+[Unit]
+Description=Liam's Dictation Service (ldsd)
+Documentation=https://github.com/BYTE-6D65/lds
+After=pipewire-pulse.service pipewire.service
+Wants=pipewire-pulse.service
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/lds daemon
+Restart=on-failure
+RestartSec=5
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%t
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ldsd
+
+[Install]
+WantedBy=default.target

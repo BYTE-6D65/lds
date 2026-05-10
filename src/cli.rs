@@ -3,6 +3,10 @@ use clap::{Args, Parser, Subcommand};
 #[derive(Parser)]
 #[command(version, about = "Liam's Dictation Service")]
 pub struct Cli {
+    /// Config file path (default: $XDG_CONFIG_HOME/lds/config.toml)
+    #[arg(short, long, global = true)]
+    pub config: Option<String>,
+
     #[clap(subcommand)]
     pub command: Command,
 }
@@ -11,17 +15,24 @@ pub struct Cli {
 pub enum Command {
     /// Run as a background daemon with IPC
     Daemon {
-        /// Path to whisper ggml model file
+        /// Path to whisper ggml model file (overrides config)
         #[arg(short, long)]
-        model: String,
+        model: Option<String>,
 
-        /// Unix domain socket path for IPC
-        #[arg(short, long, default_value = "/run/user/1000/ldsd.sock")]
-        socket: String,
+        /// Unix domain socket path for IPC (overrides config)
+        #[arg(short, long)]
+        socket: Option<String>,
 
-        /// Audio capture device name (empty = default)
-        #[arg(long, default_value = "")]
-        device: String,
+        /// Audio capture device name (empty = auto-detect PipeWire)
+        #[arg(long)]
+        device: Option<String>,
+    },
+
+    /// Generate a template config file
+    InitConfig {
+        /// Output path (default: $XDG_CONFIG_HOME/lds/config.toml)
+        #[arg(short, long)]
+        output: Option<String>,
     },
 
     #[cfg(feature = "overlay")]

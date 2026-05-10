@@ -5,6 +5,7 @@ use tokio::sync::mpsc;
 
 mod audio_capture;
 mod cli;
+mod config;
 mod ipc;
 mod whisper_provider;
 
@@ -23,7 +24,9 @@ mod waybar;
 #[cfg(feature = "overlay")]
 pub fn runtime() -> &'static tokio::runtime::Runtime {
     static RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
-    RUNTIME.get_or_init(|| tokio::runtime::Runtime::new().expect("Setting up tokio runtime needs to succeed."))
+    RUNTIME.get_or_init(|| {
+        tokio::runtime::Runtime::new().expect("Setting up tokio runtime needs to succeed.")
+    })
 }
 
 /// Commands from IPC handler to daemon worker
@@ -41,30 +44,66 @@ fn main() -> Result<()> {
     match args.command {
         #[cfg(feature = "overlay")]
         cli::Command::WaybarStatus { connection_opts } => {
-            rt.block_on(async {
-                waybar::main_waybar_status(&connection_opts).await
-            })?;
+            rt.block_on(async { waybar::main_waybar_status(&connection_opts).await })?;
         }
         #[cfg(feature = "overlay")]
         command @ cli::Command::Overlay { .. } => {
             app::launch_app(command)?;
         }
-        cli::Command::Daemon { model, socket, .. } => {
-            rt.block_on(run_daemon(&model, &socket))?;
+        cli::Command::Daemon {
+            model,
+            socket,
+            device,
+        } => {
+            // Load config file
+            let config_path = args
+                .config
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(config::Config::default_path);
+            let mut cfg = config::Config::load(&config_path)?;
+
+            // CLI args override config file
+            if let Some(m) = model {
+                cfg.model = m;
+            }
+            if let Some(s) = socket {
+                cfg.socket = s;
+            }
+            if let Some(d) = device {
+                cfg.device = d;
+            }
+
+            if cfg.model.is_empty() {
+                color_eyre::eyre::bail!(
+                    "No model path specified. Use --model or set 'model' in {}",
+                    config_path.display()
+                );
+            }
+
+            rt.block_on(run_daemon(cfg))?;
+        }
+        cli::Command::InitConfig { output } => {
+            let path = output
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(config::Config::default_path);
+            config::Config::save_template(&path)?;
+            eprintln!("[lds] template config written to {}", path.display());
         }
     }
 
     Ok(())
 }
 
-async fn run_daemon(model_path: &str, socket_path: &str) -> Result<()> {
+async fn run_daemon(cfg: config::Config) -> Result<()> {
     eprintln!("[lds] daemon starting...");
 
-    eprintln!("[lds] loading model: {}", model_path);
-    let provider = Arc::new(Mutex::new(whisper_provider::WhisperProvider::new(model_path)?));
+    eprintln!("[lds] loading model: {}", cfg.model);
+    let provider = Arc::new(Mutex::new(whisper_provider::WhisperProvider::new(
+        &cfg.model,
+    )?));
     eprintln!("[lds] model loaded with Vulkan GPU.");
 
-    let capture = Arc::new(audio_capture::AudioCapture::new()?);
+    let capture = Arc::new(audio_capture::AudioCapture::new_with_device(&cfg.device)?);
     eprintln!("[lds] audio capture ready.");
 
     let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<DaemonCmd>();
@@ -87,11 +126,11 @@ async fn run_daemon(model_path: &str, socket_path: &str) -> Result<()> {
     }
 
     handle.set_state(ipc::DaemonState::Idle).await;
-    eprintln!("[lds] daemon ready. IPC on {}", socket_path);
+    eprintln!("[lds] daemon ready. IPC on {}", cfg.socket);
 
     // Spawn IPC server as a task on the SAME runtime
     let ipc_handle = handle.clone();
-    let ipc_path = socket_path.to_string();
+    let ipc_path = cfg.socket.clone();
     tokio::spawn(async move {
         if let Err(e) = ipc::serve(&ipc_path, ipc_handle).await {
             eprintln!("[ipc] server error: {}", e);
@@ -134,14 +173,22 @@ async fn run_daemon(model_path: &str, socket_path: &str) -> Result<()> {
                         let prov = provider.lock().unwrap();
                         match prov.transcribe(&samples) {
                             Ok(text) if !text.is_empty() => {
-                                eprintln!("[lds] transcript: \"{}\"", text);
-                                match write_clipboard(&text) {
-                                    Ok(()) => eprintln!("[lds] ✓ clipboard"),
-                                    Err(e) => eprintln!("[lds] ✗ clipboard: {}", e),
+                                if cfg.log_transcript {
+                                    eprintln!("[lds] transcript: \"{}\"", text);
+                                } else {
+                                    eprintln!("[lds] transcript: {} chars", text.len());
                                 }
-                                match auto_type(&text) {
-                                    Ok(()) => eprintln!("[lds] ✓ auto-type"),
-                                    Err(e) => eprintln!("[lds] ✗ auto-type: {}", e),
+                                if cfg.clipboard {
+                                    match write_clipboard(&text) {
+                                        Ok(()) => eprintln!("[lds] ✓ clipboard"),
+                                        Err(e) => eprintln!("[lds] ✗ clipboard: {}", e),
+                                    }
+                                }
+                                if cfg.auto_type {
+                                    match auto_type(&text) {
+                                        Ok(()) => eprintln!("[lds] ✓ auto-type"),
+                                        Err(e) => eprintln!("[lds] ✗ auto-type: {}", e),
+                                    }
                                 }
                                 handle.broadcast_event(
                                     "final_transcript",
