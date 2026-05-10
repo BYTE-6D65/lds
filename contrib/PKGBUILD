@@ -10,27 +10,28 @@ url="https://github.com/BYTE-6D65/lds"
 license=('MIT')
 groups=()
 
+options=('!lto')  # whisper-rs-sys cmake build doesn't play nice with LTO
+
 # Build deps
 makedepends=(
-  'rust>=1.93'
   'cargo'
-  'cmake'            # whisper-rs-sys builds whisper.cpp from source
+  'cmake'
   'git'
-  'clang'            # bindgen for whisper-rs-sys
+  'clang'
+  'vulkan-headers'
 )
 
 # Runtime deps
 depends=(
-  'vulkan-loader'    # GPU inference
-  'alsa-lib'         # cpal audio capture (PipeWire ALSA plugin)
-  'libxkbcommon'     # enigo wayland auto-type
-  'gcc-libs'         # libstdc++, libgcc_s (whisper.cpp, Rust)
+  'vulkan-icd-loader'
+  'alsa-lib'
+  'libxkbcommon'
+  'gcc-libs'
 )
 
 optdepends=(
   'pipewire-alsa: shared mic access via PipeWire ALSA plugin'
   'pipewire-pulse: PulseAudio compatibility for PipeWire'
-  'whisper.cpp-models: pre-converted ggml whisper models'
 )
 
 provides=('lds' 'ldsctl')
@@ -49,7 +50,6 @@ pkgver() {
 
 prepare() {
   cd "${srcdir}/${pkgname}"
-  # Download dependencies
   export RUSTUP_TOOLCHAIN=stable
   cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')" 2>/dev/null \
     || cargo fetch --target "$(rustc -vV | sed -n 's/host: //p')"
@@ -59,9 +59,12 @@ build() {
   cd "${srcdir}/${pkgname}"
   export RUSTUP_TOOLCHAIN=stable
   export CARGO_TARGET_DIR=target
-  # whisper-rs-sys builds whisper.cpp with GGML_VULKAN=1 via its cmake build
-  # Ensure Vulkan headers are findable
-  export Vulkan_INCLUDE_DIR=/usr/include
+
+  # whisper-rs-sys builds whisper.cpp via cmake with GGML_VULKAN=1.
+  # Don't let makepkg's CFLAGS/CXXFLAGS/LDFLAGS leak into cmake's build
+  # (the --as-needed LDFLAGS in particular can strip static archives).
+  unset CFLAGS CXXFLAGS LDFLAGS
+
   cargo build --frozen --release --bin lds --bin ldsctl
 }
 
@@ -81,10 +84,10 @@ package() {
   # Systemd user service
   install -Dm644 "contrib/ldsd.service" "${pkgdir}/usr/lib/systemd/user/ldsd.service"
 
-  # Default config (as example, not installed to /etc — user runs `lds init-config`)
+  # Config example
   install -Dm644 /dev/stdin "${pkgdir}/usr/share/doc/lds/config-example.toml" << 'EOF'
-# LDS config example — copy to ~/.config/lds/config.toml and edit
-# Run `lds init-config` to generate a template automatically
+# LDS config — copy to ~/.config/lds/config.toml
+# Or run: lds init-config
 
 model = "/path/to/ggml-large-v3-turbo-q5_0.bin"
 socket = "/run/user/1000/ldsd.sock"
