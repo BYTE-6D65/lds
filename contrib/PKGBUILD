@@ -1,0 +1,104 @@
+# Maintainer: Byte <byte@militech>
+# Co-maintainer: Annie <annie@militech>
+
+pkgname=lds-git
+pkgver=0.1.0.r0.g9ac4140
+pkgrel=1
+pkgdesc="Liam's Dictation Service — local STT daemon with Vulkan GPU, clipboard delivery, and COSMIC applet"
+arch=('x86_64')
+url="https://github.com/BYTE-6D65/lds"
+license=('MIT')
+groups=()
+
+# Build deps
+makedepends=(
+  'rust>=1.93'
+  'cargo'
+  'cmake'            # whisper-rs-sys builds whisper.cpp from source
+  'git'
+  'clang'            # bindgen for whisper-rs-sys
+)
+
+# Runtime deps
+depends=(
+  'vulkan-loader'    # GPU inference
+  'alsa-lib'         # cpal audio capture (PipeWire ALSA plugin)
+  'libxkbcommon'     # enigo wayland auto-type
+  'gcc-libs'         # libstdc++, libgcc_s (whisper.cpp, Rust)
+)
+
+optdepends=(
+  'pipewire-alsa: shared mic access via PipeWire ALSA plugin'
+  'pipewire-pulse: PulseAudio compatibility for PipeWire'
+  'whisper.cpp-models: pre-converted ggml whisper models'
+)
+
+provides=('lds' 'ldsctl')
+conflicts=('lds')
+
+source=("${pkgname}::git+${url}.git")
+sha256sums=('SKIP')
+
+pkgver() {
+  cd "${srcdir}/${pkgname}"
+  ( set -o pipefail
+    git describe --long --tags 2>/dev/null | sed 's/^v//;s/\([^-]*-g\)/r\1/;s/-/./g' \
+    || printf "0.1.0.r%s.g%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+  )
+}
+
+prepare() {
+  cd "${srcdir}/${pkgname}"
+  # Download dependencies
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')" 2>/dev/null \
+    || cargo fetch --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  cd "${srcdir}/${pkgname}"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  # whisper-rs-sys builds whisper.cpp with GGML_VULKAN=1 via its cmake build
+  # Ensure Vulkan headers are findable
+  export Vulkan_INCLUDE_DIR=/usr/include
+  cargo build --frozen --release --bin lds --bin ldsctl
+}
+
+check() {
+  cd "${srcdir}/${pkgname}"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo test --frozen --release --bin lds --bin ldsctl -- --nocapture 2>/dev/null || true
+}
+
+package() {
+  cd "${srcdir}/${pkgname}"
+
+  # Binaries
+  install -Dm755 "target/release/lds" "${pkgdir}/usr/bin/lds"
+  install -Dm755 "target/release/ldsctl" "${pkgdir}/usr/bin/ldsctl"
+
+  # Systemd user service
+  install -Dm644 "contrib/ldsd.service" "${pkgdir}/usr/lib/systemd/user/ldsd.service"
+
+  # Default config (as example, not installed to /etc — user runs `lds init-config`)
+  install -Dm644 /dev/stdin "${pkgdir}/usr/share/doc/lds/config-example.toml" << 'EOF'
+# LDS config example — copy to ~/.config/lds/config.toml and edit
+# Run `lds init-config` to generate a template automatically
+
+model = "/path/to/ggml-large-v3-turbo-q5_0.bin"
+socket = "/run/user/1000/ldsd.sock"
+device = ""
+clipboard = true
+auto_type = true
+log_transcript = false
+language = ""
+initial_prompt = ""
+EOF
+
+  # License
+  install -Dm644 LICENSE "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE" 2>/dev/null || true
+
+  # README
+  install -Dm644 README.md "${pkgdir}/usr/share/doc/lds/README.md"
+}
