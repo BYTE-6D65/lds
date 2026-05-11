@@ -28,6 +28,7 @@ depends=(
   'libxkbcommon'
   'gcc-libs'
   'wl-clipboard'
+  'wtype'
 )
 
 optdepends=(

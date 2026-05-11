@@ -275,6 +275,18 @@ fn write_clipboard(text: &str) -> Result<()> {
 }
 
 fn auto_type(text: &str) -> Result<()> {
+    // Prefer wtype on Wayland — uses zwp_virtual_keyboard_v1 protocol
+    // through the compositor, same path as on-screen keyboards.
+    // enigo fails from systemd context (no Wayland compositor connection).
+    match std::process::Command::new("wtype")
+        .arg("--")
+        .arg(text)
+        .status()
+    {
+        Ok(status) if status.success() => return Ok(()),
+        _ => {} // wtype failed or not found, fall through
+    }
+    // Fallback: enigo (works for GUI apps, fails from systemd)
     use enigo::{Enigo, Keyboard, Settings};
     let mut enigo = Enigo::new(&Settings::default())?;
     enigo.text(text)?;
