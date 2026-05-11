@@ -26,6 +26,9 @@ pub enum DaemonState {
     Idle,
     Recording,
     Transcribing,
+    Streaming {
+        partial_text: String,
+    },
     ClipboardWritten,
     Error(String),
 }
@@ -37,7 +40,8 @@ pub struct DaemonHandle {
     // Callbacks — set by main daemon loop
     pub on_start: Mutex<Option<Box<dyn Send + Sync + Fn() -> Result<()>>>>,
     pub on_stop: Mutex<Option<Box<dyn Send + Sync + Fn() -> Result<String>>>>,
-    // on_stop returns transcript text
+    /// Streaming: abort in-flight transcription
+    pub on_abort: Mutex<Option<Box<dyn Send + Sync + Fn()>>>,
 }
 
 impl DaemonHandle {
@@ -48,6 +52,7 @@ impl DaemonHandle {
             event_tx,
             on_start: Mutex::new(None),
             on_stop: Mutex::new(None),
+            on_abort: Mutex::new(None),
         }
     }
 
@@ -60,10 +65,12 @@ impl DaemonHandle {
         let msg = IpcMessage {
             msg_type: "state".into(),
             id: None,
-            ts: Some(std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs_f64()),
+            ts: Some(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs_f64(),
+            ),
             payload: Some(serde_json::to_value(&new_state).unwrap_or_default()),
         };
         let _ = self.event_tx.send(msg);
@@ -73,10 +80,12 @@ impl DaemonHandle {
         let msg = IpcMessage {
             msg_type: msg_type.into(),
             id: None,
-            ts: Some(std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs_f64()),
+            ts: Some(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs_f64(),
+            ),
             payload: Some(payload),
         };
         let _ = self.event_tx.send(msg);
@@ -97,7 +106,10 @@ pub async fn serve(socket_path: &str, handle: Arc<DaemonHandle>) -> Result<()> {
     println!("[ipc] listening on {}", socket_path);
 
     loop {
-        let (stream, _) = listener.accept().await.with_context(|| "failed to accept IPC connection")?;
+        let (stream, _) = listener
+            .accept()
+            .await
+            .with_context(|| "failed to accept IPC connection")?;
         let ws_stream = tokio_tungstenite::accept_async(stream)
             .await
             .with_context(|| "WebSocket handshake failed")?;
@@ -197,10 +209,12 @@ async fn handle_request(handle: &DaemonHandle, msg: &IpcMessage) -> IpcMessage {
                 match callback() {
                     Ok(text) => {
                         handle.set_state(DaemonState::ClipboardWritten).await;
-                        handle.broadcast_event(
-                            "final_transcript",
-                            serde_json::json!({ "text": text }),
-                        ).await;
+                        handle
+                            .broadcast_event(
+                                "final_transcript",
+                                serde_json::json!({ "text": text }),
+                            )
+                            .await;
                         IpcMessage {
                             msg_type: "session_stopped".into(),
                             id: msg.id.clone(),
@@ -221,6 +235,25 @@ async fn handle_request(handle: &DaemonHandle, msg: &IpcMessage) -> IpcMessage {
                     id: msg.id.clone(),
                     ts: None,
                     payload: Some(serde_json::json!({ "error": "no stop handler registered" })),
+                }
+            }
+        }
+        "abort" => {
+            let on_abort = handle.on_abort.lock().await;
+            if let Some(ref callback) = *on_abort {
+                callback();
+                IpcMessage {
+                    msg_type: "aborted".into(),
+                    id: msg.id.clone(),
+                    ts: None,
+                    payload: None,
+                }
+            } else {
+                IpcMessage {
+                    msg_type: "error".into(),
+                    id: msg.id.clone(),
+                    ts: None,
+                    payload: Some(serde_json::json!({ "error": "no abort handler registered" })),
                 }
             }
         }

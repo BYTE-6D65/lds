@@ -124,6 +124,12 @@ impl AudioCapture {
     pub fn buffer_len(&self) -> usize {
         self.buffer.lock().unwrap().len()
     }
+
+    /// Drain accumulated samples without stopping recording.
+    /// Returns what's accumulated since last drain, keeps recording.
+    pub fn drain_buffer(&self) -> Vec<f32> {
+        std::mem::take(&mut *self.buffer.lock().unwrap())
+    }
 }
 
 impl Drop for AudioCapture {

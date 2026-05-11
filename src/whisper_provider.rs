@@ -1,11 +1,10 @@
 use color_eyre::eyre::{Context, Result};
 use std::path::PathBuf;
-use std::sync::Mutex;
-use whisper_rs::{
-    FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters,
-};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
-/// Pluggable STT provider. Currently wraps whisper-rs with Vulkan GPU.
+/// Pluggable STT provider wrapping whisper-rs with Vulkan GPU.
 pub struct WhisperProvider {
     ctx: WhisperContext,
     model_path: PathBuf,
@@ -26,16 +25,21 @@ impl WhisperProvider {
         })
     }
 
-    /// Transcribe audio samples (f32, mono, 16kHz) to text.
+    /// Batch transcription: transcribe audio samples (f32, mono, 16kHz) to text.
     /// Returns the full transcript as a single string.
-    pub fn transcribe(&self, audio: &[f32]) -> Result<String> {
+    pub fn transcribe(&self, audio: &[f32], language: &str, initial_prompt: &str) -> Result<String> {
         let mut state = self
             .ctx
             .create_state()
             .with_context(|| "failed to create whisper state")?;
 
         let mut wparams = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
-        wparams.set_language(Some("en"));
+        if !language.is_empty() {
+            wparams.set_language(Some(language));
+        }
+        if !initial_prompt.is_empty() {
+            wparams.set_initial_prompt(initial_prompt);
+        }
         wparams.set_print_progress(false);
         wparams.set_print_timestamps(false);
         wparams.set_print_special(false);
@@ -44,18 +48,54 @@ impl WhisperProvider {
             .full(wparams, audio)
             .with_context(|| "whisper transcription failed")?;
 
-        let n_segments = state.full_n_segments();
-        let mut text = String::new();
-        for i in 0..n_segments {
-            if let Some(seg) = state.get_segment(i) {
-                if let Ok(s) = seg.to_str() {
-                    text.push_str(s);
-                    text.push(' ');
-                }
-            }
-        }
+        Ok(assemble_transcript(&state))
+    }
 
-        Ok(text.trim().to_string())
+    /// Streaming transcription with per-segment callback.
+    /// `on_segment` fires for each new segment as it's decoded.
+    /// Returns the full assembled transcript.
+    /// Set `abort_flag` to true to cancel mid-transcription.
+    pub fn transcribe_streaming<F>(
+        &self,
+        audio: &[f32],
+        language: &str,
+        initial_prompt: &str,
+        on_segment: F,
+        abort_flag: Arc<AtomicBool>,
+    ) -> Result<String>
+    where
+        F: FnMut(whisper_rs::SegmentCallbackData) + 'static,
+    {
+        let mut state = self
+            .ctx
+            .create_state()
+            .with_context(|| "failed to create whisper state")?;
+
+        let mut wparams = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+        if !language.is_empty() {
+            wparams.set_language(Some(language));
+        }
+        if !initial_prompt.is_empty() {
+            wparams.set_initial_prompt(initial_prompt);
+        }
+        wparams.set_print_progress(false);
+        wparams.set_print_timestamps(false);
+        wparams.set_print_special(false);
+        wparams.set_single_segment(true);
+        wparams.set_split_on_word(true);
+
+        // Safe segment callback — fires for each new segment with text included
+        wparams.set_segment_callback_safe(on_segment);
+
+        // Abort flag — checked each decoder step
+        let flag = abort_flag.clone();
+        wparams.set_abort_callback_safe(move || flag.load(Ordering::Relaxed));
+
+        state
+            .full(wparams, audio)
+            .with_context(|| "whisper streaming transcription failed")?;
+
+        Ok(assemble_transcript(&state))
     }
 
     pub fn model_path(&self) -> &PathBuf {
@@ -63,5 +103,20 @@ impl WhisperProvider {
     }
 }
 
+/// Extract full transcript text from a completed whisper state.
+fn assemble_transcript(state: &whisper_rs::WhisperState) -> String {
+    let n_segments = state.full_n_segments();
+    let mut text = String::new();
+    for i in 0..n_segments {
+        if let Some(seg) = state.get_segment(i) {
+            if let Ok(s) = seg.to_str() {
+                text.push_str(s);
+                text.push(' ');
+            }
+        }
+    }
+    text.trim().to_string()
+}
+
 /// Thread-safe wrapper for use across async tasks.
-pub type SharedWhisperProvider = Mutex<WhisperProvider>;
+pub type SharedWhisperProvider = std::sync::Mutex<WhisperProvider>;

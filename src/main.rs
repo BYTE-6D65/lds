@@ -1,12 +1,15 @@
 use clap::Parser;
 use color_eyre::eyre::Result;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::sync::mpsc;
 
 mod audio_capture;
 mod cli;
 mod config;
 mod ipc;
+mod streaming;
+mod vad;
 mod whisper_provider;
 
 /// Commands from IPC handler to daemon worker
@@ -65,7 +68,11 @@ fn main() -> Result<()> {
 }
 
 async fn run_daemon(cfg: config::Config) -> Result<()> {
-    eprintln!("[lds] daemon starting...");
+    let is_streaming = cfg.is_streaming();
+    eprintln!(
+        "[lds] daemon starting... (mode: {})",
+        if is_streaming { "streaming" } else { "batch" }
+    );
 
     eprintln!("[lds] loading model: {}", cfg.model);
     let provider = Arc::new(Mutex::new(whisper_provider::WhisperProvider::new(
@@ -79,7 +86,38 @@ async fn run_daemon(cfg: config::Config) -> Result<()> {
     let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<DaemonCmd>();
     let handle = Arc::new(ipc::DaemonHandle::new());
 
-    // Register IPC callbacks → send commands through channel
+    // VAD for streaming mode
+    let vad: Option<Arc<Mutex<vad::Vad>>> = if is_streaming {
+        let vad_model_path = find_vad_model();
+        match vad_model_path {
+            Some(path) => {
+                eprintln!("[lds] loading VAD model: {}", path);
+                match vad::Vad::new(&path, cfg.vad_threshold, cfg.vad_min_silence_ms) {
+                    Ok(v) => {
+                        eprintln!("[lds] VAD ready.");
+                        Some(Arc::new(Mutex::new(v)))
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "[lds] warning: VAD init failed ({}), falling back to batch",
+                            e
+                        );
+                        None
+                    }
+                }
+            }
+            None => {
+                eprintln!(
+                    "[lds] warning: no VAD model found, streaming disabled — using batch mode"
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    // Register IPC callbacks
     {
         let cmd_tx = cmd_tx.clone();
         *handle.on_start.lock().await = Some(Box::new(move || {
@@ -109,7 +147,15 @@ async fn run_daemon(cfg: config::Config) -> Result<()> {
 
     // Daemon worker loop
     let recording: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
+
+    // Streaming state
+    let stream_audio_tx: Arc<Mutex<Option<tokio::sync::mpsc::Sender<Vec<f32>>>>> =
+        Arc::new(Mutex::new(None));
+
     loop {
+        let chunk_sleep = tokio::time::sleep(Duration::from_millis(cfg.chunk_interval_ms));
+        tokio::pin!(chunk_sleep);
+
         tokio::select! {
             Some(cmd) = cmd_rx.recv() => {
                 match cmd {
@@ -120,67 +166,159 @@ async fn run_daemon(cfg: config::Config) -> Result<()> {
                         }
                         *recording.lock().unwrap() = true;
                         capture.start();
-                        handle.set_state(ipc::DaemonState::Recording).await;
+
+                        if is_streaming {
+                            if let Some(ref vad_ctx) = vad {
+                                let (coord, audio_tx) = streaming::StreamingCoordinator::new(
+                                    provider.clone(),
+                                    vad_ctx.clone(),
+                                    handle.clone(),
+                                    streaming::StreamingConfig::from(&cfg),
+                                );
+                                coord.reset_abort();
+
+                                // Store the audio sender
+                                *stream_audio_tx.lock().unwrap() = Some(audio_tx);
+
+                                // Spawn the streaming coordinator
+                                let handle_ref = handle.clone();
+                                let cfg_ref = cfg.clone();
+                                let recording_flag = recording.clone();
+                                let stream_tx = stream_audio_tx.clone();
+
+                                tokio::spawn(async move {
+                                    let result = coord.run().await;
+
+                                    match result {
+                                        Ok(text) if !text.is_empty() => {
+                                            deliver_transcript(&text, &cfg_ref, &handle_ref).await;
+                                        }
+                                        Ok(_) => {
+                                            eprintln!("[streaming] no speech detected");
+                                        }
+                                        Err(e) => {
+                                            eprintln!("[streaming] error: {}", e);
+                                        }
+                                    }
+
+                                    *recording_flag.lock().unwrap() = false;
+                                    *stream_tx.lock().unwrap() = None;
+                                });
+                            } else {
+                                // No VAD — fall back to batch behavior
+                                handle.set_state(ipc::DaemonState::Recording).await;
+                            }
+                        } else {
+                            handle.set_state(ipc::DaemonState::Recording).await;
+                        }
                     }
                     DaemonCmd::Stop => {
                         if !*recording.lock().unwrap() {
                             eprintln!("[lds] not recording");
                             continue;
                         }
-                        *recording.lock().unwrap() = false;
-                        let samples = capture.stop();
-                        dump_wav(&samples);
 
-                        if samples.is_empty() {
-                            eprintln!("[lds] no audio captured");
-                            handle.set_state(ipc::DaemonState::Error("no audio captured".into())).await;
-                            continue;
-                        }
+                        if is_streaming {
+                            // Close the audio channel — coordinator will finalize
+                            drop(stream_audio_tx.lock().unwrap().take());
+                            // The streaming task will set recording=false when done
+                        } else {
+                            // Batch mode
+                            *recording.lock().unwrap() = false;
+                            let samples = capture.stop();
+                            dump_wav(&samples);
 
-                        let duration = samples.len() as f32 / 16000.0;
-                        eprintln!("[lds] transcribing {:.1}s...", duration);
-                        handle.set_state(ipc::DaemonState::Transcribing).await;
-
-                        let prov = provider.lock().unwrap();
-                        match prov.transcribe(&samples) {
-                            Ok(text) if !text.is_empty() => {
-                                if cfg.log_transcript {
-                                    eprintln!("[lds] transcript: \"{}\"", text);
-                                } else {
-                                    eprintln!("[lds] transcript: {} chars", text.len());
-                                }
-                                // Clipboard: always — guaranteed delivery
-                                match write_clipboard(&text) {
-                                    Ok(()) => eprintln!("[lds] ✓ clipboard"),
-                                    Err(e) => eprintln!("[lds] ✗ clipboard: {}", e),
-                                }
-                                // Auto-type: best-effort bonus
-                                if cfg.auto_type {
-                                    match auto_type(&text) {
-                                        Ok(()) => eprintln!("[lds] ✓ auto-type"),
-                                        Err(e) => eprintln!("[lds] ✗ auto-type: {}", e),
-                                    }
-                                }
-                                handle.broadcast_event(
-                                    "final_transcript",
-                                    serde_json::json!({ "text": text }),
-                                ).await;
-                                handle.set_state(ipc::DaemonState::ClipboardWritten).await;
+                            if samples.is_empty() {
+                                eprintln!("[lds] no audio captured");
+                                handle.set_state(ipc::DaemonState::Error("no audio captured".into())).await;
+                                continue;
                             }
-                            Ok(_) => {
-                                eprintln!("[lds] no speech detected");
-                                handle.set_state(ipc::DaemonState::Error("no speech detected".into())).await;
-                            }
-                            Err(e) => {
-                                eprintln!("[lds] transcription error: {}", e);
-                                handle.set_state(ipc::DaemonState::Error(e.to_string())).await;
+
+                            let duration = samples.len() as f32 / 16000.0;
+                            eprintln!("[lds] transcribing {:.1}s...", duration);
+                            handle.set_state(ipc::DaemonState::Transcribing).await;
+
+                            let prov = provider.lock().unwrap();
+                            match prov.transcribe(&samples, &cfg.language, &cfg.initial_prompt) {
+                                Ok(text) if !text.is_empty() => {
+                                    deliver_transcript(&text, &cfg, &handle).await;
+                                }
+                                Ok(_) => {
+                                    eprintln!("[lds] no speech detected");
+                                    handle.set_state(ipc::DaemonState::Error("no speech detected".into())).await;
+                                }
+                                Err(e) => {
+                                    eprintln!("[lds] transcription error: {}", e);
+                                    handle.set_state(ipc::DaemonState::Error(e.to_string())).await;
+                                }
                             }
                         }
                     }
                 }
             }
+            _ = &mut chunk_sleep, if *recording.lock().unwrap() && is_streaming => {
+                // Feed audio from capture to streaming coordinator
+                let samples = capture.drain_buffer();
+                if !samples.is_empty() {
+                    let tx_guard = stream_audio_tx.lock().unwrap();
+                    if let Some(ref sender) = *tx_guard {
+                        let _ = sender.try_send(samples);
+                    }
+                }
+            }
         }
     }
+}
+
+/// Deliver transcript: clipboard + auto-type + IPC broadcast.
+async fn deliver_transcript(text: &str, cfg: &config::Config, handle: &Arc<ipc::DaemonHandle>) {
+    if cfg.log_transcript {
+        eprintln!("[lds] transcript: \"{}\"", text);
+    } else {
+        eprintln!("[lds] transcript: {} chars", text.len());
+    }
+
+    match write_clipboard(text) {
+        Ok(()) => eprintln!("[lds] ✓ clipboard"),
+        Err(e) => eprintln!("[lds] ✗ clipboard: {}", e),
+    }
+
+    if cfg.auto_type {
+        match auto_type(text) {
+            Ok(()) => eprintln!("[lds] ✓ auto-type"),
+            Err(e) => eprintln!("[lds] ✗ auto-type: {}", e),
+        }
+    }
+
+    handle
+        .broadcast_event("final_transcript", serde_json::json!({ "text": text }))
+        .await;
+    handle
+        .set_state(ipc::DaemonState::ClipboardWritten)
+        .await;
+}
+
+/// Find the Silero VAD model file.
+fn find_vad_model() -> Option<String> {
+    let candidates = [
+        format!(
+            "/home/{}/.hermes/hermes-agent/venv/lib/python3.11/site-packages/faster_whisper/assets/silero_vad_v6.onnx",
+            std::env::var("USER").unwrap_or_default()
+        ),
+        "/home/byte/Projects/AI-tubing/.venv/lib/python3.14/site-packages/faster_whisper/assets/silero_vad_v6.onnx".into(),
+        format!(
+            "/home/{}/.local/share/lds/silero_vad.onnx",
+            std::env::var("USER").unwrap_or_default()
+        ),
+    ];
+
+    for path in &candidates {
+        if std::path::Path::new(path).exists() {
+            return Some(path.clone());
+        }
+    }
+
+    None
 }
 
 /// Dump captured audio to /tmp/lds-last-recording.wav for debugging
