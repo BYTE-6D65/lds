@@ -1,5 +1,5 @@
 [Unit]
-Description=Liam's Dictation Service (ldsd)
+Description=Linguistic Dispatch System (ldsd)
 Documentation=https://github.com/BYTE-6D65/lds
 After=pipewire-pulse.service pipewire.service
 Wants=pipewire-pulse.service

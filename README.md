@@ -1,4 +1,4 @@
-# LDS — Liam's Dictation Service
+# LDS — Linguistic Dispatch System
 
 Local speech-to-text daemon for Linux desktop. Vulkan GPU accelerated via whisper.cpp, shared mic via PipeWire, clipboard-first delivery, COSMIC panel applet.
 

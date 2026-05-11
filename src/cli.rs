@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(version, about = "Liam's Dictation Service")]
+#[command(version, about = "Linguistic Dispatch System")]
 pub struct Cli {
     /// Config file path (default: $XDG_CONFIG_HOME/lds/config.toml)
     #[arg(short, long, global = true)]
