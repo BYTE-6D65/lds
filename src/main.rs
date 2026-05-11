@@ -300,16 +300,14 @@ async fn deliver_transcript(text: &str, cfg: &config::Config, handle: &Arc<ipc::
 
 /// Find the Silero VAD model file.
 fn find_vad_model() -> Option<String> {
+    let user = std::env::var("USER").unwrap_or_default();
     let candidates = [
-        format!(
-            "/home/{}/.hermes/hermes-agent/venv/lib/python3.11/site-packages/faster_whisper/assets/silero_vad_v6.onnx",
-            std::env::var("USER").unwrap_or_default()
-        ),
-        "/home/byte/Projects/AI-tubing/.venv/lib/python3.14/site-packages/faster_whisper/assets/silero_vad_v6.onnx".into(),
-        format!(
-            "/home/{}/.local/share/lds/silero_vad.onnx",
-            std::env::var("USER").unwrap_or_default()
-        ),
+        // GGML Silero VAD models (whisper.cpp native format)
+        format!("/home/{user}/.local/share/lds/ggml-silero-v6.2.0.bin"),
+        format!("/home/{user}/.local/share/lds/ggml-silero-v5.1.2.bin"),
+        // Relative to project
+        "models/ggml-silero-v6.2.0.bin".into(),
+        "models/ggml-silero-v5.1.2.bin".into(),
     ];
 
     for path in &candidates {

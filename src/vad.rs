@@ -22,7 +22,7 @@ impl Vad {
     /// `min_silence_ms`: minimum silence duration to trigger segment end.
     pub fn new(vad_model_path: &str, threshold: f32, min_silence_ms: u32) -> Result<Self> {
         let mut ctx_params = WhisperVadContextParams::new();
-        ctx_params.set_use_gpu(true);
+        ctx_params.set_use_gpu(false);
 
         let ctx = WhisperVadContext::new(vad_model_path, ctx_params)
             .with_context(|| format!("failed to load VAD model from {}", vad_model_path))?;
