@@ -1,5 +1,6 @@
 use crate::config::Config;
 use crate::ipc::DaemonHandle;
+use crate::smooth_typist::SmoothTypist;
 use crate::vad::SharedVad;
 use crate::whisper_provider::SharedWhisperProvider;
 use color_eyre::eyre::Result;
@@ -8,11 +9,10 @@ use std::sync::Arc;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::time::Duration;
 
-/// Rolling transcription coordinator.
+/// Rolling transcription coordinator with smooth typing.
 ///
-/// Simple model: accumulate audio while speech is detected. Every N ms,
-/// transcribe whatever's in the buffer, type the FULL output, then clear
-/// the buffer. Next pass only sees fresh audio. No dedup needed.
+/// Accumulate audio while speech is detected. Every N ms, transcribe
+/// whatever's in the buffer, feed to smooth typist, then clear the buffer.
 pub struct StreamingCoordinator {
     provider: Arc<SharedWhisperProvider>,
     vad: Arc<SharedVad>,
@@ -20,6 +20,7 @@ pub struct StreamingCoordinator {
     config: StreamingConfig,
     abort_flag: Arc<AtomicBool>,
     full_text: Arc<AsyncMutex<String>>,
+    typist: SmoothTypist,
     audio_rx: tokio::sync::Mutex<tokio::sync::mpsc::Receiver<Vec<f32>>>,
 }
 
@@ -60,6 +61,7 @@ impl StreamingCoordinator {
             config,
             abort_flag: Arc::new(AtomicBool::new(false)),
             full_text: Arc::new(AsyncMutex::new(String::new())),
+            typist: SmoothTypist::new(),
             audio_rx: tokio::sync::Mutex::new(audio_rx),
         };
 
@@ -115,8 +117,10 @@ impl StreamingCoordinator {
                                     "[streaming] final pass ({}s)",
                                     buffer.len() as f32 / 16000.0
                                 );
-                                self.transcribe_and_type(&buffer).await?;
+                                self.transcribe_and_feed(&buffer).await?;
                             }
+                            // Flush remaining typed text at max speed
+                            self.typist.flush();
                             let text = self.full_text.lock().await.clone();
                             return Ok(text.trim().to_string());
                         }
@@ -163,7 +167,7 @@ impl StreamingCoordinator {
                     "[streaming] rolling ({}s)",
                     buffer.len() as f32 / 16000.0
                 );
-                self.transcribe_and_type(&buffer).await?;
+                self.transcribe_and_feed(&buffer).await?;
                 // Clear buffer — next pass only gets fresh audio
                 buffer.clear();
                 last_transcribe = std::time::Instant::now();
@@ -173,7 +177,7 @@ impl StreamingCoordinator {
             if in_speech && silence_count >= 6 {
                 eprintln!("[streaming] silence timeout");
                 if !buffer.is_empty() {
-                    self.transcribe_and_type(&buffer).await?;
+                    self.transcribe_and_feed(&buffer).await?;
                     buffer.clear();
                 }
                 in_speech = false;
@@ -184,13 +188,14 @@ impl StreamingCoordinator {
             tokio::time::sleep(Duration::from_millis(80)).await;
         }
 
+        // Abort — flush and return
+        self.typist.flush();
         let text = self.full_text.lock().await.clone();
         Ok(text.trim().to_string())
     }
 
-    /// Transcribe audio buffer and type the full result.
-    /// Each call covers only new audio since the last clear.
-    async fn transcribe_and_type(&self, audio: &[f32]) -> Result<()> {
+    /// Transcribe audio buffer and feed result to smooth typist.
+    async fn transcribe_and_feed(&self, audio: &[f32]) -> Result<()> {
         if audio.is_empty() {
             return Ok(());
         }
@@ -219,7 +224,7 @@ impl StreamingCoordinator {
 
         eprintln!("[streaming] got: \"{}\"", text.trim());
 
-        // Type it — prepend space if there's been previous output
+        // Prepare text for typing — prepend space if there's been previous output
         let text_for_type = {
             let full = self.full_text.lock().await;
             if full.is_empty() {
@@ -228,13 +233,10 @@ impl StreamingCoordinator {
                 format!(" {}", text.trim())
             }
         };
-        tokio::task::spawn_blocking(move || {
-            if let Err(e) = crate::auto_type(&text_for_type) {
-                eprintln!("[streaming] type error: {}", e);
-            }
-        })
-        .await
-        .ok();
+
+        // Feed to smooth typist with estimated time to next result
+        let next_interval = self.config.rolling_interval_ms as f64 / 1000.0;
+        self.typist.type_text(&text_for_type, next_interval);
 
         // Accumulate full text and update clipboard
         let mut full = self.full_text.lock().await;

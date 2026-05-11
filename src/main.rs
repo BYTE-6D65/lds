@@ -8,6 +8,7 @@ mod audio_capture;
 mod cli;
 mod config;
 mod ipc;
+mod smooth_typist;
 mod streaming;
 mod vad;
 mod whisper_provider;
