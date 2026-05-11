@@ -9,26 +9,6 @@ mod config;
 mod ipc;
 mod whisper_provider;
 
-#[cfg(feature = "overlay")]
-mod app;
-
-#[cfg(feature = "overlay")]
-mod hotkeys;
-
-#[cfg(feature = "overlay")]
-mod keyboard;
-
-#[cfg(feature = "overlay")]
-mod waybar;
-
-#[cfg(feature = "overlay")]
-pub fn runtime() -> &'static tokio::runtime::Runtime {
-    static RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
-    RUNTIME.get_or_init(|| {
-        tokio::runtime::Runtime::new().expect("Setting up tokio runtime needs to succeed.")
-    })
-}
-
 /// Commands from IPC handler to daemon worker
 enum DaemonCmd {
     Start,
@@ -42,27 +22,17 @@ fn main() -> Result<()> {
     let rt = tokio::runtime::Runtime::new()?;
 
     match args.command {
-        #[cfg(feature = "overlay")]
-        cli::Command::WaybarStatus { connection_opts } => {
-            rt.block_on(async { waybar::main_waybar_status(&connection_opts).await })?;
-        }
-        #[cfg(feature = "overlay")]
-        command @ cli::Command::Overlay { .. } => {
-            app::launch_app(command)?;
-        }
         cli::Command::Daemon {
             model,
             socket,
             device,
         } => {
-            // Load config file
             let config_path = args
                 .config
                 .map(std::path::PathBuf::from)
                 .unwrap_or_else(config::Config::default_path);
             let mut cfg = config::Config::load(&config_path)?;
 
-            // CLI args override config file
             if let Some(m) = model {
                 cfg.model = m;
             }
@@ -128,7 +98,7 @@ async fn run_daemon(cfg: config::Config) -> Result<()> {
     handle.set_state(ipc::DaemonState::Idle).await;
     eprintln!("[lds] daemon ready. IPC on {}", cfg.socket);
 
-    // Spawn IPC server as a task on the SAME runtime
+    // Spawn IPC server
     let ipc_handle = handle.clone();
     let ipc_path = cfg.socket.clone();
     tokio::spawn(async move {
@@ -137,7 +107,7 @@ async fn run_daemon(cfg: config::Config) -> Result<()> {
         }
     });
 
-    // Daemon worker loop — processes commands from IPC
+    // Daemon worker loop
     let recording: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
     loop {
         tokio::select! {
@@ -159,8 +129,6 @@ async fn run_daemon(cfg: config::Config) -> Result<()> {
                         }
                         *recording.lock().unwrap() = false;
                         let samples = capture.stop();
-
-                        // Dump last recording to WAV (useful for debugging)
                         dump_wav(&samples);
 
                         if samples.is_empty() {
@@ -224,18 +192,18 @@ fn dump_wav(samples: &[f32]) {
     match std::fs::File::create(path) {
         Ok(mut f) => {
             use std::io::Write;
-            let data_len = (samples.len() * 2) as u32; // 16-bit PCM
+            let data_len = (samples.len() * 2) as u32;
             let _ = f.write_all(b"RIFF");
             let _ = f.write_all(&(36 + data_len).to_le_bytes());
             let _ = f.write_all(b"WAVE");
             let _ = f.write_all(b"fmt ");
-            let _ = f.write_all(&16u32.to_le_bytes());    // chunk size
-            let _ = f.write_all(&1u16.to_le_bytes());     // PCM format
-            let _ = f.write_all(&1u16.to_le_bytes());     // mono
-            let _ = f.write_all(&16000u32.to_le_bytes()); // sample rate
-            let _ = f.write_all(&32000u32.to_le_bytes()); // byte rate (16000 * 2)
-            let _ = f.write_all(&2u16.to_le_bytes());     // block align
-            let _ = f.write_all(&16u16.to_le_bytes());    // bits per sample
+            let _ = f.write_all(&16u32.to_le_bytes());
+            let _ = f.write_all(&1u16.to_le_bytes());
+            let _ = f.write_all(&1u16.to_le_bytes());
+            let _ = f.write_all(&16000u32.to_le_bytes());
+            let _ = f.write_all(&32000u32.to_le_bytes());
+            let _ = f.write_all(&2u16.to_le_bytes());
+            let _ = f.write_all(&16u16.to_le_bytes());
             let _ = f.write_all(b"data");
             let _ = f.write_all(&data_len.to_le_bytes());
             for s in samples {
@@ -248,9 +216,6 @@ fn dump_wav(samples: &[f32]) {
 }
 
 fn write_clipboard(text: &str) -> Result<()> {
-    // Prefer wl-copy on Wayland — it forks a background holder process
-    // that keeps the clipboard offer alive. arboard's temporary Wayland
-    // connection gets garbage-collected by the compositor.
     match std::process::Command::new("wl-copy")
         .arg("--trim-newline")
         .stdin(std::process::Stdio::piped())
@@ -266,27 +231,22 @@ fn write_clipboard(text: &str) -> Result<()> {
                 return Ok(());
             }
         }
-        Err(_) => {} // wl-copy not found, fall through to arboard
+        Err(_) => {}
     }
-    // Fallback: arboard (works on X11, unreliable on Wayland for headless)
     let mut clipboard = arboard::Clipboard::new()?;
     clipboard.set_text(text)?;
     Ok(())
 }
 
 fn auto_type(text: &str) -> Result<()> {
-    // Prefer wtype on Wayland — uses zwp_virtual_keyboard_v1 protocol
-    // through the compositor, same path as on-screen keyboards.
-    // enigo fails from systemd context (no Wayland compositor connection).
     match std::process::Command::new("wtype")
         .arg("--")
         .arg(text)
         .status()
     {
         Ok(status) if status.success() => return Ok(()),
-        _ => {} // wtype failed or not found, fall through
+        _ => {}
     }
-    // Fallback: enigo (works for GUI apps, fails from systemd)
     use enigo::{Enigo, Keyboard, Settings};
     let mut enigo = Enigo::new(&Settings::default())?;
     enigo.text(text)?;
