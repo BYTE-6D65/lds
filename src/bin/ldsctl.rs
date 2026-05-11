@@ -23,6 +23,8 @@ enum Command {
     Start,
     /// Stop recording session
     Stop,
+    /// Toggle recording: start if idle, stop if recording
+    Toggle,
 }
 
 #[tokio::main]
@@ -66,6 +68,52 @@ async fn main() -> Result<()> {
                 let text = resp.to_string();
                 if text.contains("session_stopped") || text.contains("\"error\"") {
                     break;
+                }
+            }
+        }
+        Command::Toggle => {
+            // Query current state first
+            let msg = json!({"type": "status", "id": "t1"});
+            ws_sender
+                .send(Message::Text(msg.to_string().into()))
+                .await?;
+
+            let state = if let Some(Ok(resp)) = ws_receiver.next().await {
+                let text = resp.to_string();
+                // Parse state from status response
+                if text.contains("\"Recording\"") {
+                    "recording"
+                } else if text.contains("\"Transcribing\"") {
+                    "transcribing"
+                } else {
+                    "idle"
+                }
+            } else {
+                "idle"
+            };
+
+            match state {
+                "recording" | "transcribing" => {
+                    let msg = json!({"type": "stop_session", "id": "t2"});
+                    ws_sender
+                        .send(Message::Text(msg.to_string().into()))
+                        .await?;
+                    while let Some(Ok(resp)) = ws_receiver.next().await {
+                        println!("{}", resp);
+                        let text = resp.to_string();
+                        if text.contains("session_stopped") || text.contains("\"error\"") {
+                            break;
+                        }
+                    }
+                }
+                _ => {
+                    let msg = json!({"type": "start_session", "id": "t2"});
+                    ws_sender
+                        .send(Message::Text(msg.to_string().into()))
+                        .await?;
+                    if let Some(Ok(resp)) = ws_receiver.next().await {
+                        println!("{}", resp);
+                    }
                 }
             }
         }
