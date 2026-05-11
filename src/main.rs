@@ -161,7 +161,9 @@ async fn run_daemon(cfg: config::Config) -> Result<()> {
                 match cmd {
                     DaemonCmd::Start => {
                         if *recording.lock().unwrap() {
-                            eprintln!("[lds] already recording");
+                            // Toggle: treat Start while recording as Stop
+                            eprintln!("[lds] toggle: already recording, stopping");
+                            cmd_tx.send(DaemonCmd::Stop).ok();
                             continue;
                         }
                         *recording.lock().unwrap() = true;
@@ -189,9 +191,19 @@ async fn run_daemon(cfg: config::Config) -> Result<()> {
                                 tokio::spawn(async move {
                                     let result = coord.run().await;
 
+                                    // Streaming already typed + clipboard during rolling passes.
+                                    // Just finalize state.
                                     match result {
                                         Ok(text) if !text.is_empty() => {
-                                            deliver_transcript(&text, &cfg_ref, &handle_ref).await;
+                                            eprintln!("[lds] transcript: \"{}\"", &text[..text.len().min(200)]);
+                                            // Clipboard already updated during rolling passes.
+                                            // Only update if coordinator didn't (e.g. final pass had nothing new).
+                                            if let Err(e) = crate::write_clipboard(&text) {
+                                                eprintln!("[lds] ✗ clipboard: {}", e);
+                                            } else {
+                                                eprintln!("[lds] ✓ clipboard");
+                                            }
+                                            handle_ref.set_state(ipc::DaemonState::ClipboardWritten).await;
                                         }
                                         Ok(_) => {
                                             eprintln!("[streaming] no speech detected");
@@ -218,10 +230,14 @@ async fn run_daemon(cfg: config::Config) -> Result<()> {
                             continue;
                         }
 
+                        // Always stop audio capture immediately
+                        capture.stop();
+                        *recording.lock().unwrap() = false;
+
                         if is_streaming {
                             // Close the audio channel — coordinator will finalize
                             drop(stream_audio_tx.lock().unwrap().take());
-                            // The streaming task will set recording=false when done
+                            // The streaming task will deliver transcript
                         } else {
                             // Batch mode
                             *recording.lock().unwrap() = false;
@@ -351,7 +367,7 @@ fn dump_wav(samples: &[f32]) {
     }
 }
 
-fn write_clipboard(text: &str) -> Result<()> {
+pub fn write_clipboard(text: &str) -> Result<()> {
     match std::process::Command::new("wl-copy")
         .arg("--trim-newline")
         .stdin(std::process::Stdio::piped())
@@ -374,7 +390,7 @@ fn write_clipboard(text: &str) -> Result<()> {
     Ok(())
 }
 
-fn auto_type(text: &str) -> Result<()> {
+pub fn auto_type(text: &str) -> Result<()> {
     match std::process::Command::new("wtype")
         .arg("--")
         .arg(text)

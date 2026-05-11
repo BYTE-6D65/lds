@@ -129,6 +129,7 @@ pub async fn serve(socket_path: &str, handle: Arc<DaemonHandle>) -> Result<()> {
                         match msg {
                             Some(Ok(Message::Text(text))) => {
                                 if let Ok(ipc_msg) = serde_json::from_str::<IpcMessage>(&text) {
+                                    eprintln!("[ipc] received: {}", ipc_msg.msg_type);
                                     let response = handle_request(&handle, &ipc_msg).await;
                                     let resp_json = serde_json::to_string(&response).unwrap_or_default();
                                     if ws_sender.send(Message::Text(resp_json.into())).await.is_err() {

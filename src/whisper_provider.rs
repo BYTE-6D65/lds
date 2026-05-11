@@ -1,8 +1,21 @@
 use color_eyre::eyre::{Context, Result};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
+
+/// Common whisper hallucination patterns — discard if output matches.
+const HALLUCINATIONS: &[&str] = &[
+    "thank you",
+    "thank you.",
+    "thanks for watching",
+    "thanks for watching.",
+    "thank you for watching",
+    "thank you for watching.",
+    "subscribe",
+    "subscribe.",
+    "please subscribe",
+    "like and subscribe",
+    "thank you for your attention",
+];
 
 /// Pluggable STT provider wrapping whisper-rs with Vulkan GPU.
 pub struct WhisperProvider {
@@ -25,8 +38,7 @@ impl WhisperProvider {
         })
     }
 
-    /// Batch transcription: transcribe audio samples (f32, mono, 16kHz) to text.
-    /// Returns the full transcript as a single string.
+    /// Transcribe audio samples (f32, mono, 16kHz) to text.
     pub fn transcribe(&self, audio: &[f32], language: &str, initial_prompt: &str) -> Result<String> {
         let mut state = self
             .ctx
@@ -43,59 +55,18 @@ impl WhisperProvider {
         wparams.set_print_progress(false);
         wparams.set_print_timestamps(false);
         wparams.set_print_special(false);
+        wparams.set_split_on_word(true);
+        // Suppress hallucination — whisper sometimes loops on silence
+        wparams.set_suppress_blank(true);
 
         state
             .full(wparams, audio)
             .with_context(|| "whisper transcription failed")?;
 
-        Ok(assemble_transcript(&state))
-    }
+        let raw = assemble_transcript(&state);
 
-    /// Streaming transcription with per-segment callback.
-    /// `on_segment` fires for each new segment as it's decoded.
-    /// Returns the full assembled transcript.
-    /// Set `abort_flag` to true to cancel mid-transcription.
-    pub fn transcribe_streaming<F>(
-        &self,
-        audio: &[f32],
-        language: &str,
-        initial_prompt: &str,
-        on_segment: F,
-        abort_flag: Arc<AtomicBool>,
-    ) -> Result<String>
-    where
-        F: FnMut(whisper_rs::SegmentCallbackData) + 'static,
-    {
-        let mut state = self
-            .ctx
-            .create_state()
-            .with_context(|| "failed to create whisper state")?;
-
-        let mut wparams = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
-        if !language.is_empty() {
-            wparams.set_language(Some(language));
-        }
-        if !initial_prompt.is_empty() {
-            wparams.set_initial_prompt(initial_prompt);
-        }
-        wparams.set_print_progress(false);
-        wparams.set_print_timestamps(false);
-        wparams.set_print_special(false);
-        wparams.set_single_segment(true);
-        wparams.set_split_on_word(true);
-
-        // Safe segment callback — fires for each new segment with text included
-        wparams.set_segment_callback_safe(on_segment);
-
-        // Abort flag — checked each decoder step
-        let flag = abort_flag.clone();
-        wparams.set_abort_callback_safe(move || flag.load(Ordering::Relaxed));
-
-        state
-            .full(wparams, audio)
-            .with_context(|| "whisper streaming transcription failed")?;
-
-        Ok(assemble_transcript(&state))
+        // Filter hallucinations
+        Ok(filter_hallucinations(&raw))
     }
 
     pub fn model_path(&self) -> &PathBuf {
@@ -116,6 +87,23 @@ fn assemble_transcript(state: &whisper_rs::WhisperState) -> String {
         }
     }
     text.trim().to_string()
+}
+
+/// Filter out known whisper hallucination patterns.
+fn filter_hallucinations(text: &str) -> String {
+    let trimmed = text.trim().to_lowercase();
+
+    // If the ENTIRE output is a hallucination, discard it
+    if HALLUCINATIONS.iter().any(|h| trimmed == *h) {
+        return String::new();
+    }
+
+    // If it's very short (< 4 chars) and doesn't contain real words, discard
+    if trimmed.len() < 4 {
+        return String::new();
+    }
+
+    text.to_string()
 }
 
 /// Thread-safe wrapper for use across async tasks.
