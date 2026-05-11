@@ -10,6 +10,7 @@ mod config;
 mod ipc;
 mod smooth_typist;
 mod streaming;
+mod text_middleware;
 mod vad;
 mod whisper_provider;
 

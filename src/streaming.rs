@@ -222,6 +222,12 @@ impl StreamingCoordinator {
             return Ok(());
         }
 
+        // Run through text middleware — regex cleanup, filler removal, etc.
+        let text = crate::text_middleware::clean_text(&text);
+        if text.is_empty() {
+            return Ok(());
+        }
+
         eprintln!("[streaming] got: \"{}\"", text.trim());
 
         // Prepare text for typing — prepend space if there's been previous output

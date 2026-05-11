@@ -22,3 +22,5 @@ tokio-tungstenite = "0.26"
 whisper-rs = { version = "0.16", features = ["vulkan"] }
 arboard = "3.4"
 toml = "0.8"
+regex = "1.12.3"
+fancy-regex = "0.18.0"
