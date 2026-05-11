@@ -38,7 +38,7 @@ impl From<&Config> for StreamingConfig {
     fn from(cfg: &Config) -> Self {
         Self {
             rolling_interval_ms: cfg.chunk_interval_ms,
-            min_audio_ms: 1500,
+            min_audio_ms: cfg.min_audio_ms,
             language: cfg.language.clone(),
             initial_prompt: cfg.initial_prompt.clone(),
         }

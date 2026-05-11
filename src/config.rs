@@ -49,6 +49,10 @@ pub struct Config {
     /// Streaming: send partial_transcript IPC events
     #[serde(default = "default_true")]
     pub partial_results: bool,
+
+    /// Streaming: minimum audio (ms) before first transcription pass
+    #[serde(default = "default_min_audio_ms")]
+    pub min_audio_ms: u64,
 }
 
 fn default_socket() -> String {
@@ -78,6 +82,10 @@ fn default_chunk_interval_ms() -> u64 {
     2000
 }
 
+fn default_min_audio_ms() -> u64 {
+    1500
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -93,6 +101,7 @@ impl Default for Config {
             vad_min_silence_ms: default_vad_min_silence_ms(),
             chunk_interval_ms: default_chunk_interval_ms(),
             partial_results: true,
+            min_audio_ms: default_min_audio_ms(),
         }
     }
 }

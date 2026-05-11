@@ -42,6 +42,8 @@ pub struct DaemonHandle {
     pub on_stop: Mutex<Option<Box<dyn Send + Sync + Fn() -> Result<String>>>>,
     /// Streaming: abort in-flight transcription
     pub on_abort: Mutex<Option<Box<dyn Send + Sync + Fn()>>>,
+    /// Config update callback — receives partial JSON, returns current config
+    pub on_config_update: Mutex<Option<Box<dyn Send + Sync + Fn(serde_json::Value) -> serde_json::Value>>>,
 }
 
 impl DaemonHandle {
@@ -53,6 +55,7 @@ impl DaemonHandle {
             on_start: Mutex::new(None),
             on_stop: Mutex::new(None),
             on_abort: Mutex::new(None),
+            on_config_update: Mutex::new(None),
         }
     }
 
@@ -255,6 +258,46 @@ async fn handle_request(handle: &DaemonHandle, msg: &IpcMessage) -> IpcMessage {
                     id: msg.id.clone(),
                     ts: None,
                     payload: Some(serde_json::json!({ "error": "no abort handler registered" })),
+                }
+            }
+        }
+        "get_config" => {
+            let on_cfg = handle.on_config_update.lock().await;
+            if let Some(ref callback) = *on_cfg {
+                let current = callback(serde_json::Value::Null);
+                IpcMessage {
+                    msg_type: "config".into(),
+                    id: msg.id.clone(),
+                    ts: None,
+                    payload: Some(current),
+                }
+            } else {
+                IpcMessage {
+                    msg_type: "error".into(),
+                    id: msg.id.clone(),
+                    ts: None,
+                    payload: Some(serde_json::json!({ "error": "no config handler registered" })),
+                }
+            }
+        }
+        "update_config" => {
+            let update = msg.payload.clone().unwrap_or_default();
+            let on_cfg = handle.on_config_update.lock().await;
+            if let Some(ref callback) = *on_cfg {
+                let current = callback(update);
+                eprintln!("[ipc] config updated");
+                IpcMessage {
+                    msg_type: "config".into(),
+                    id: msg.id.clone(),
+                    ts: None,
+                    payload: Some(current),
+                }
+            } else {
+                IpcMessage {
+                    msg_type: "error".into(),
+                    id: msg.id.clone(),
+                    ts: None,
+                    payload: Some(serde_json::json!({ "error": "no config handler registered" })),
                 }
             }
         }

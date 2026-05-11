@@ -71,6 +71,8 @@ fn main() -> Result<()> {
 
 async fn run_daemon(cfg: config::Config) -> Result<()> {
     let is_streaming = cfg.is_streaming();
+    // Shared config for live updates from IPC
+    let live_cfg = Arc::new(std::sync::Mutex::new(cfg.clone()));
     eprintln!(
         "[lds] daemon starting... (mode: {})",
         if is_streaming { "streaming" } else { "batch" }
@@ -132,6 +134,42 @@ async fn run_daemon(cfg: config::Config) -> Result<()> {
         *handle.on_stop.lock().await = Some(Box::new(move || {
             cmd_tx.send(DaemonCmd::Stop).ok();
             Ok(String::new())
+        }));
+    }
+
+    // Config update callback — returns current config, applies updates
+    {
+        let live_cfg = live_cfg.clone();
+        *handle.on_config_update.lock().await = Some(Box::new(move |update: serde_json::Value| {
+            if !update.is_null() {
+                let mut cfg = live_cfg.lock().unwrap();
+                if let Some(v) = update.get("min_audio_ms").and_then(|v| v.as_u64()) {
+                    cfg.min_audio_ms = v;
+                    eprintln!("[config] min_audio_ms = {}", v);
+                }
+                if let Some(v) = update.get("vad_threshold").and_then(|v| v.as_f64()) {
+                    cfg.vad_threshold = v as f32;
+                    eprintln!("[config] vad_threshold = {}", v);
+                }
+                if let Some(v) = update.get("chunk_interval_ms").and_then(|v| v.as_u64()) {
+                    cfg.chunk_interval_ms = v;
+                    eprintln!("[config] chunk_interval_ms = {}", v);
+                }
+                if let Some(v) = update.get("vad_min_silence_ms").and_then(|v| v.as_u64()) {
+                    cfg.vad_min_silence_ms = v as u32;
+                    eprintln!("[config] vad_min_silence_ms = {}", v);
+                }
+            }
+            // Return current config
+            let cfg = live_cfg.lock().unwrap();
+            serde_json::json!({
+                "min_audio_ms": cfg.min_audio_ms,
+                "vad_threshold": cfg.vad_threshold,
+                "chunk_interval_ms": cfg.chunk_interval_ms,
+                "vad_min_silence_ms": cfg.vad_min_silence_ms,
+                "mode": cfg.mode,
+                "auto_type": cfg.auto_type,
+            })
         }));
     }
 
