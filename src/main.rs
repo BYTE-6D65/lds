@@ -151,7 +151,14 @@ async fn run_daemon(cfg: config::Config) -> Result<()> {
                         *recording.lock().unwrap() = true;
                         capture.start();
                         handle.set_state(ipc::DaemonState::Recording).await;
-                        eprintln!("[lds] ● recording...");
+                        {
+                            let mut dbg = std::fs::OpenOptions::new()
+                                .create(true).append(true)
+                                .open("/tmp/lds-debug.log")
+                                .unwrap();
+                            use std::io::Write;
+                            writeln!(dbg, "[start] buffer_len={}", capture.buffer_len()).unwrap();
+                        }
                     }
                     DaemonCmd::Stop => {
                         if !*recording.lock().unwrap() {
@@ -160,6 +167,16 @@ async fn run_daemon(cfg: config::Config) -> Result<()> {
                         }
                         *recording.lock().unwrap() = false;
                         let samples = capture.stop();
+
+                        // Debug: dump to file
+                        {
+                            let mut dbg = std::fs::OpenOptions::new()
+                                .create(true).append(true)
+                                .open("/tmp/lds-debug.log")
+                                .unwrap();
+                            use std::io::Write;
+                            writeln!(dbg, "[stop] samples={}", samples.len()).unwrap();
+                        }
 
                         if samples.is_empty() {
                             handle.set_state(ipc::DaemonState::Error("no audio captured".into())).await;
@@ -173,6 +190,14 @@ async fn run_daemon(cfg: config::Config) -> Result<()> {
                         let prov = provider.lock().unwrap();
                         match prov.transcribe(&samples) {
                             Ok(text) if !text.is_empty() => {
+                                {
+                                    let mut dbg = std::fs::OpenOptions::new()
+                                        .create(true).append(true)
+                                        .open("/tmp/lds-debug.log")
+                                        .unwrap();
+                                    use std::io::Write;
+                                    writeln!(dbg, "[transcribe] ok: \"{}\"", text).unwrap();
+                                }
                                 if cfg.log_transcript {
                                     eprintln!("[lds] transcript: \"{}\"", text);
                                 } else {
@@ -180,8 +205,22 @@ async fn run_daemon(cfg: config::Config) -> Result<()> {
                                 }
                                 if cfg.clipboard {
                                     match write_clipboard(&text) {
-                                        Ok(()) => eprintln!("[lds] ✓ clipboard"),
-                                        Err(e) => eprintln!("[lds] ✗ clipboard: {}", e),
+                                        Ok(()) => {
+                                            let mut dbg = std::fs::OpenOptions::new()
+                                                .create(true).append(true)
+                                                .open("/tmp/lds-debug.log")
+                                                .unwrap();
+                                            use std::io::Write;
+                                            writeln!(dbg, "[clipboard] ok").unwrap();
+                                        }
+                                        Err(e) => {
+                                            let mut dbg = std::fs::OpenOptions::new()
+                                                .create(true).append(true)
+                                                .open("/tmp/lds-debug.log")
+                                                .unwrap();
+                                            use std::io::Write;
+                                            writeln!(dbg, "[clipboard] FAIL: {}", e).unwrap();
+                                        }
                                     }
                                 }
                                 if cfg.auto_type {
@@ -197,9 +236,25 @@ async fn run_daemon(cfg: config::Config) -> Result<()> {
                                 handle.set_state(ipc::DaemonState::ClipboardWritten).await;
                             }
                             Ok(_) => {
+                                {
+                                    let mut dbg = std::fs::OpenOptions::new()
+                                        .create(true).append(true)
+                                        .open("/tmp/lds-debug.log")
+                                        .unwrap();
+                                    use std::io::Write;
+                                    writeln!(dbg, "[transcribe] empty result").unwrap();
+                                }
                                 handle.set_state(ipc::DaemonState::Error("no speech detected".into())).await;
                             }
                             Err(e) => {
+                                {
+                                    let mut dbg = std::fs::OpenOptions::new()
+                                        .create(true).append(true)
+                                        .open("/tmp/lds-debug.log")
+                                        .unwrap();
+                                    use std::io::Write;
+                                    writeln!(dbg, "[transcribe] error: {}", e).unwrap();
+                                }
                                 handle.set_state(ipc::DaemonState::Error(e.to_string())).await;
                             }
                         }
@@ -211,6 +266,27 @@ async fn run_daemon(cfg: config::Config) -> Result<()> {
 }
 
 fn write_clipboard(text: &str) -> Result<()> {
+    // Prefer wl-copy on Wayland — it forks a background holder process
+    // that keeps the clipboard offer alive. arboard's temporary Wayland
+    // connection gets garbage-collected by the compositor.
+    match std::process::Command::new("wl-copy")
+        .arg("--trim-newline")
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(mut child) => {
+            use std::io::Write;
+            if let Some(ref mut stdin) = child.stdin {
+                stdin.write_all(text.as_bytes())?;
+            }
+            let status = child.wait()?;
+            if status.success() {
+                return Ok(());
+            }
+        }
+        Err(_) => {} // wl-copy not found, fall through to arboard
+    }
+    // Fallback: arboard (works on X11, unreliable on Wayland for headless)
     let mut clipboard = arboard::Clipboard::new()?;
     clipboard.set_text(text)?;
     Ok(())
