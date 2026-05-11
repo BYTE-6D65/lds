@@ -10,15 +10,9 @@ ExecStart=/usr/bin/lds daemon
 Restart=on-failure
 RestartSec=5
 
-# Wayland clipboard needs these
+# Wayland + audio clipboard needs these
 Environment=WAYLAND_DISPLAY=wayland-1
 Environment=XDG_RUNTIME_DIR=/run/user/%U
-
-# Security
-NoNewPrivileges=true
-ProtectSystem=strict
-ProtectHome=read-only
-ReadWritePaths=%t
 
 # Logging
 StandardOutput=journal
