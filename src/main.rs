@@ -149,12 +149,12 @@ async fn run_daemon(cfg: config::Config) -> Result<()> {
                                 } else {
                                     eprintln!("[lds] transcript: {} chars", text.len());
                                 }
-                                if cfg.clipboard {
-                                    match write_clipboard(&text) {
-                                        Ok(()) => eprintln!("[lds] ✓ clipboard"),
-                                        Err(e) => eprintln!("[lds] ✗ clipboard: {}", e),
-                                    }
+                                // Clipboard: always — guaranteed delivery
+                                match write_clipboard(&text) {
+                                    Ok(()) => eprintln!("[lds] ✓ clipboard"),
+                                    Err(e) => eprintln!("[lds] ✗ clipboard: {}", e),
                                 }
+                                // Auto-type: best-effort bonus
                                 if cfg.auto_type {
                                     match auto_type(&text) {
                                         Ok(()) => eprintln!("[lds] ✓ auto-type"),

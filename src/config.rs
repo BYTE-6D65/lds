@@ -14,10 +14,6 @@ pub struct Config {
     #[serde(default)]
     pub device: String,
 
-    /// Write transcript to clipboard after transcription
-    #[serde(default = "default_true")]
-    pub clipboard: bool,
-
     /// Auto-type transcript after transcription (best-effort)
     #[serde(default = "default_true")]
     pub auto_type: bool,
@@ -52,7 +48,6 @@ impl Default for Config {
             model: String::new(),
             socket: default_socket(),
             device: String::new(),
-            clipboard: true,
             auto_type: true,
             log_transcript: false,
             language: String::new(),
