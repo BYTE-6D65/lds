@@ -274,17 +274,15 @@ async fn run_daemon(cfg: config::Config) -> Result<()> {
                             continue;
                         }
 
-                        // Always stop audio capture immediately
-                        capture.stop();
+                        // Stop capture and grab samples
+                        let samples = capture.stop();
                         *recording.lock().unwrap() = false;
 
                         if live_cfg.lock().unwrap().is_streaming() {
+                            // Streaming mode: close the audio channel — coordinator will finalize
                             drop(stream_audio_tx.lock().unwrap().take());
-                            // The streaming task will deliver transcript
                         } else {
                             // Batch mode
-                            *recording.lock().unwrap() = false;
-                            let samples = capture.stop();
                             dump_wav(&samples);
 
                             if samples.is_empty() {
