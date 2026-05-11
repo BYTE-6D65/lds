@@ -90,8 +90,8 @@ async fn run_daemon(cfg: config::Config) -> Result<()> {
     let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<DaemonCmd>();
     let handle = Arc::new(ipc::DaemonHandle::new());
 
-    // VAD for streaming mode
-    let vad: Option<Arc<Mutex<vad::Vad>>> = if is_streaming {
+    // Always load VAD — needed for streaming mode, cheap at 865KB
+    let vad: Option<Arc<Mutex<vad::Vad>>> = {
         let vad_model_path = find_vad_model();
         match vad_model_path {
             Some(path) => {
@@ -112,13 +112,11 @@ async fn run_daemon(cfg: config::Config) -> Result<()> {
             }
             None => {
                 eprintln!(
-                    "[lds] warning: no VAD model found, streaming disabled — using batch mode"
+                    "[lds] warning: no VAD model found, streaming disabled"
                 );
                 None
             }
         }
-    } else {
-        None
     };
 
     // Register IPC callbacks
@@ -158,6 +156,12 @@ async fn run_daemon(cfg: config::Config) -> Result<()> {
                 if let Some(v) = update.get("vad_min_silence_ms").and_then(|v| v.as_u64()) {
                     cfg.vad_min_silence_ms = v as u32;
                     eprintln!("[config] vad_min_silence_ms = {}", v);
+                }
+                if let Some(v) = update.get("mode").and_then(|v| v.as_str()) {
+                    if v == "batch" || v == "streaming" {
+                        cfg.mode = v.to_string();
+                        eprintln!("[config] mode = {}", v);
+                    }
                 }
             }
             // Return current config
@@ -209,13 +213,13 @@ async fn run_daemon(cfg: config::Config) -> Result<()> {
                         *recording.lock().unwrap() = true;
                         capture.start();
 
-                        if is_streaming {
+                        if live_cfg.lock().unwrap().is_streaming() {
                             if let Some(ref vad_ctx) = vad {
                                 let (coord, audio_tx) = streaming::StreamingCoordinator::new(
                                     provider.clone(),
                                     vad_ctx.clone(),
                                     handle.clone(),
-                                    streaming::StreamingConfig::from(&cfg),
+                                    streaming::StreamingConfig::from(&*live_cfg.lock().unwrap()),
                                 );
                                 coord.reset_abort();
 
@@ -274,8 +278,7 @@ async fn run_daemon(cfg: config::Config) -> Result<()> {
                         capture.stop();
                         *recording.lock().unwrap() = false;
 
-                        if is_streaming {
-                            // Close the audio channel — coordinator will finalize
+                        if live_cfg.lock().unwrap().is_streaming() {
                             drop(stream_audio_tx.lock().unwrap().take());
                             // The streaming task will deliver transcript
                         } else {
@@ -312,7 +315,7 @@ async fn run_daemon(cfg: config::Config) -> Result<()> {
                     }
                 }
             }
-            _ = &mut chunk_sleep, if *recording.lock().unwrap() && is_streaming => {
+            _ = &mut chunk_sleep, if *recording.lock().unwrap() && live_cfg.lock().unwrap().is_streaming() => {
                 // Feed audio from capture to streaming coordinator
                 let samples = capture.drain_buffer();
                 if !samples.is_empty() {
