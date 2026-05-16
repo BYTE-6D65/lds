@@ -24,3 +24,4 @@ arboard = "3.4"
 toml = "0.8"
 regex = "1.12.3"
 fancy-regex = "0.18.0"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }

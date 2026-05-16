@@ -11,6 +11,7 @@ mod ipc;
 mod smooth_typist;
 mod streaming;
 mod text_middleware;
+mod transcript_log;
 mod vad;
 mod whisper_provider;
 
@@ -240,6 +241,13 @@ async fn run_daemon(cfg: config::Config) -> Result<()> {
                                     match result {
                                         Ok(text) if !text.is_empty() => {
                                             eprintln!("[lds] transcript: \"{}\"", &text[..text.len().min(200)]);
+
+                                            // Persist transcript to disk
+                                            match transcript_log::save_transcript(&text) {
+                                                Ok(path) => eprintln!("[lds] ✓ transcript saved: {}", path.display()),
+                                                Err(e) => eprintln!("[lds] ✗ transcript save: {}", e),
+                                            }
+
                                             // Clipboard already updated during rolling passes.
                                             // Only update if coordinator didn't (e.g. final pass had nothing new).
                                             if let Err(e) = crate::write_clipboard(&text) {
@@ -328,20 +336,35 @@ async fn run_daemon(cfg: config::Config) -> Result<()> {
 }
 
 /// Deliver transcript: clipboard + auto-type + IPC broadcast.
-async fn deliver_transcript(text: &str, cfg: &config::Config, handle: &Arc<ipc::DaemonHandle>) {
+async fn deliver_transcript(raw: &str, cfg: &config::Config, handle: &Arc<ipc::DaemonHandle>) {
+    // Run text middleware on raw whisper output (period cleanup, filler removal, etc.)
+    let text = text_middleware::clean_text(raw);
+
+    if text.is_empty() {
+        eprintln!("[lds] transcript: empty after middleware cleanup");
+        handle.set_state(ipc::DaemonState::Error("no speech detected".into())).await;
+        return;
+    }
+
     if cfg.log_transcript {
         eprintln!("[lds] transcript: \"{}\"", text);
     } else {
         eprintln!("[lds] transcript: {} chars", text.len());
     }
 
-    match write_clipboard(text) {
+    // Persist transcript to disk (belt-and-suspenders for clipboard failures)
+    match transcript_log::save_transcript(&text) {
+        Ok(path) => eprintln!("[lds] ✓ transcript saved: {}", path.display()),
+        Err(e) => eprintln!("[lds] ✗ transcript save: {}", e),
+    }
+
+    match write_clipboard(&text) {
         Ok(()) => eprintln!("[lds] ✓ clipboard"),
         Err(e) => eprintln!("[lds] ✗ clipboard: {}", e),
     }
 
     if cfg.auto_type {
-        match auto_type(text) {
+        match auto_type(&text) {
             Ok(()) => eprintln!("[lds] ✓ auto-type"),
             Err(e) => eprintln!("[lds] ✗ auto-type: {}", e),
         }
