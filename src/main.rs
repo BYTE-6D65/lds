@@ -337,11 +337,14 @@ async fn run_daemon(cfg: config::Config) -> Result<()> {
 
 /// Deliver transcript: clipboard + auto-type + IPC broadcast.
 async fn deliver_transcript(raw: &str, cfg: &config::Config, handle: &Arc<ipc::DaemonHandle>) {
-    // Run text middleware on raw whisper output (period cleanup, filler removal, etc.)
-    let text = text_middleware::clean_text(raw);
+    // Batch mode should preserve Whisper's transcript as directly as possible.
+    // The regex middleware is too destructive for dictation: it can strip short
+    // tokens like "I" and damage literals/acronyms. Keep middleware reserved for
+    // streaming's rolling partial chunks.
+    let text = raw.trim().to_string();
 
     if text.is_empty() {
-        eprintln!("[lds] transcript: empty after middleware cleanup");
+        eprintln!("[lds] transcript: empty after transcription");
         handle.set_state(ipc::DaemonState::Error("no speech detected".into())).await;
         return;
     }
