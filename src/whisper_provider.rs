@@ -49,13 +49,21 @@ impl WhisperProvider {
         if !language.is_empty() {
             wparams.set_language(Some(language));
         }
-        if !initial_prompt.is_empty() {
-            wparams.set_initial_prompt(initial_prompt);
-        }
+        let prompt = if initial_prompt.trim().is_empty() {
+            "Verbatim dictation transcript. Preserve every spoken word, including short words like I, a, an, the, to, by, if, is, and it. Preserve acronyms, variable names, product names, file names, command names, and other literal tokens exactly as heard. Do not trim leading or trailing letters from literals. Do not rewrite grammar. Use light punctuation only when the speaker clearly ends a sentence."
+        } else {
+            initial_prompt
+        };
+        wparams.set_initial_prompt(prompt);
         wparams.set_print_progress(false);
         wparams.set_print_timestamps(false);
         wparams.set_print_special(false);
-        wparams.set_split_on_word(true);
+        // Batch mode needs faithful segment text, not word-boundary splitting. The
+        // latter can make literal/acronym edges look clipped in long recordings.
+        wparams.set_split_on_word(false);
+        // Long dictation should not let earlier decoded text pressure later
+        // segments into "corrected" grammar or trimmed literal tokens.
+        wparams.set_no_context(true);
         // Suppress hallucination — whisper sometimes loops on silence
         wparams.set_suppress_blank(true);
 
