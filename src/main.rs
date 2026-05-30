@@ -295,7 +295,13 @@ pub fn write_clipboard(text: &str) -> Result<()> {
 }
 
 pub fn auto_type(text: &str) -> Result<()> {
+    // Use wtype with a 2ms inter-key delay. Without this, wtype blasts all
+    // characters at Wayland as fast as possible and the compositor can drop
+    // key events under load, causing missing characters (especially repeated
+    // chars like the P in VIP, the A in hammer, etc.).
     match std::process::Command::new("wtype")
+        .arg("-d")
+        .arg("2")
         .arg("--")
         .arg(text)
         .status()
