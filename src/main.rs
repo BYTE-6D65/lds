@@ -9,6 +9,7 @@ mod config;
 mod ipc;
 mod text_middleware;
 mod transcript_log;
+mod wayland_typist;
 mod whisper_provider;
 
 /// Commands from IPC handler to daemon worker
@@ -68,6 +69,19 @@ fn main() -> Result<()> {
 
 async fn run_daemon(cfg: config::Config) -> Result<()> {
     eprintln!("[lds] daemon starting... (mode: batch)");
+
+    // Initialize native Wayland typist
+    let typist = Arc::new(Mutex::new(match wayland_typist::WaylandTypist::new() {
+        Ok(t) => {
+            eprintln!("[lds] native Wayland typist ready.");
+            t
+        }
+        Err(e) => {
+            eprintln!("[lds] warning: native typist failed ({}), falling back to wtype", e);
+            // We'll check for None and fall back to spawn-based typing
+            return Err(color_eyre::eyre::eyre!("native typist init failed: {}", e));
+        }
+    }));
 
     eprintln!("[lds] loading model: {}", cfg.model);
     let provider = Arc::new(Mutex::new(whisper_provider::WhisperProvider::new(
@@ -176,7 +190,7 @@ async fn run_daemon(cfg: config::Config) -> Result<()> {
                         let prov = provider.lock().unwrap();
                         match prov.transcribe(&samples, &cfg.language, &cfg.initial_prompt) {
                             Ok(text) if !text.is_empty() => {
-                                deliver_transcript(&text, &cfg, &handle).await;
+                                deliver_transcript(&text, &cfg, &handle, &typist).await;
                             }
                             Ok(_) => {
                                 eprintln!("[lds] no speech detected");
@@ -195,7 +209,7 @@ async fn run_daemon(cfg: config::Config) -> Result<()> {
 }
 
 /// Deliver transcript: clipboard + auto-type + IPC broadcast.
-async fn deliver_transcript(raw: &str, cfg: &config::Config, handle: &Arc<ipc::DaemonHandle>) {
+async fn deliver_transcript(raw: &str, cfg: &config::Config, handle: &Arc<ipc::DaemonHandle>, typist: &Arc<Mutex<wayland_typist::WaylandTypist>>) {
     // Run through text middleware — strips hallucinated filler/noise from
     // stagnant air ("thank you", "thanks for watching", lone noise words, etc.)
     // and cleans up punctuation artifacts.
@@ -225,9 +239,15 @@ async fn deliver_transcript(raw: &str, cfg: &config::Config, handle: &Arc<ipc::D
     }
 
     if cfg.auto_type {
-        match auto_type(&text) {
-            Ok(()) => eprintln!("[lds] ✓ auto-type"),
-            Err(e) => eprintln!("[lds] ✗ auto-type: {}", e),
+        match typist.lock().unwrap().type_text(&text) {
+            Ok(()) => eprintln!("[lds] ✓ auto-type (native)"),
+            Err(e) => {
+                eprintln!("[lds] ✗ native auto-type: {}, falling back to wtype", e);
+                match auto_type(&text) {
+                    Ok(()) => eprintln!("[lds] ✓ auto-type (wtype fallback)"),
+                    Err(e) => eprintln!("[lds] ✗ auto-type: {}", e),
+                }
+            }
         }
     }
 
