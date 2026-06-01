@@ -152,8 +152,11 @@ impl WaylandTypist {
         tmp.flush()?;
 
         // WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1 = 1
-        self.keyboard.keymap(1, unsafe { BorrowedFd::borrow_raw(tmp.as_raw_fd()) }, keymap_size as u32);
+        // SAFETY: tmp stays alive until after flush, compositor dup's the fd per Wayland protocol.
+        let fd = unsafe { BorrowedFd::borrow_raw(tmp.as_raw_fd()) };
+        self.keyboard.keymap(1, fd, keymap_size as u32);
         self.display.flush()?;
+        drop(tmp); // explicit drop after flush
 
         self.keymap_dirty = false;
         Ok(())
