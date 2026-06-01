@@ -239,16 +239,20 @@ async fn deliver_transcript(raw: &str, cfg: &config::Config, handle: &Arc<ipc::D
     }
 
     if cfg.auto_type {
-        match typist.lock().unwrap().type_text(&text) {
-            Ok(()) => eprintln!("[lds] ✓ auto-type (native)"),
-            Err(e) => {
-                eprintln!("[lds] ✗ native auto-type: {}, falling back to wtype", e);
-                match auto_type(&text) {
-                    Ok(()) => eprintln!("[lds] ✓ auto-type (wtype fallback)"),
-                    Err(e) => eprintln!("[lds] ✗ auto-type: {}", e),
+        let type_text = text.clone();
+        let typist = typist.clone();
+        tokio::task::spawn_blocking(move || {
+            match typist.lock().unwrap().type_text(&type_text) {
+                Ok(()) => eprintln!("[lds] ✓ auto-type (native)"),
+                Err(e) => {
+                    eprintln!("[lds] ✗ native auto-type: {}, falling back to wtype", e);
+                    match auto_type(&type_text) {
+                        Ok(()) => eprintln!("[lds] ✓ auto-type (wtype fallback)"),
+                        Err(e) => eprintln!("[lds] ✗ auto-type: {}", e),
+                    }
                 }
             }
-        }
+        }).await.ok();
     }
 
     handle

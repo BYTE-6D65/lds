@@ -164,8 +164,8 @@ impl WaylandTypist {
 
     /// Type a string of text.
     ///
-    /// All key press/release events are queued and flushed in a single batch —
-    /// no per-character roundtrips.
+    /// Key events are sent with inter-character delays to give clients time
+    /// to process each event. A single roundtrip at the end confirms delivery.
     pub fn type_text(&mut self, text: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         if text.is_empty() {
             return Ok(());
@@ -180,19 +180,24 @@ impl WaylandTypist {
         // Upload keymap if it changed
         self.upload_keymap()?;
 
-        // Queue all key press/release events
+        // Send key events with inter-character delay.
+        // Browsers and other complex clients drop key events when they arrive
+        // too fast in a single flush. 5ms per character is fast enough for
+        // dictation (~200 chars/sec) but slow enough for clients to keep up.
         let mut time_ms: u32 = 0;
+        let inter_key_us = 5000; // 5ms between characters
+
         for kc in &keycodes {
-            // WL_KEYBOARD_KEY_STATE_PRESSED = 1
-            self.keyboard.key(time_ms, *kc, 1);
+            self.keyboard.key(time_ms, *kc, 1); // PRESSED
             time_ms += 1;
-            // WL_KEYBOARD_KEY_STATE_RELEASED = 0
-            self.keyboard.key(time_ms, *kc, 0);
+            self.keyboard.key(time_ms, *kc, 0); // RELEASED
             time_ms += 1;
+            self.display.flush()?;
+            std::thread::sleep(std::time::Duration::from_micros(inter_key_us));
         }
 
-        // Single flush for the entire text
-        self.display.flush()?;
+        // Final roundtrip to ensure everything is delivered
+        self.queue.blocking_dispatch(&mut TypistState)?;
 
         Ok(())
     }
