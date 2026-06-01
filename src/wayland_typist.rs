@@ -196,9 +196,6 @@ impl WaylandTypist {
             std::thread::sleep(std::time::Duration::from_micros(inter_key_us));
         }
 
-        // Final roundtrip to ensure everything is delivered
-        self.queue.blocking_dispatch(&mut TypistState)?;
-
         Ok(())
     }
 }
