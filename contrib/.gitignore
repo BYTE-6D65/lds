@@ -1,0 +1,8 @@
+# makepkg build artifacts — never commit
+src/
+pkg/
+*.pkg.tar.*
+*.log
+
+# makepkg source=() checkout dir (named after pkgname)
+lds-git/
