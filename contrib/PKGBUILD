@@ -4,7 +4,7 @@
 pkgname=lds-git
 pkgver=0.1.0.r0.g9ac4140
 pkgrel=1
-pkgdesc="Liam's Dictation Service — local STT daemon with Vulkan GPU, clipboard delivery, and COSMIC applet"
+pkgdesc="Linguistic Dispatch System — local STT daemon with Vulkan GPU, clipboard delivery, and COSMIC applet"
 arch=('x86_64')
 url="https://github.com/BYTE-6D65/lds"
 license=('MIT')
